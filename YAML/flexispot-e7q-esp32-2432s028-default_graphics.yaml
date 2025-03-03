@@ -1,0 +1,653 @@
+substitutions:
+  device_name: E7Q - default graphics library
+  manufacturer: Flexispot
+  model: E7Q
+  name: office-desk-flexispot-e7q
+  ap_fallback_ssid: "Loctekmotioncontroller"
+  ap_fallback_password: "YourVeryOwnFallbackPW"
+  encryption_key: "PleaseReplaceThisText"
+  ota_encryption_key: "PleaseReplaceThisTextToo"
+  ### Loctek-related settings
+  baud_rate: "9600"
+  loctekmotion_tx_pin: GPIO1 # Hardware UART
+  loctekmotion_rx_pin: GPIO3 # Hardware UART
+  loctekmotion_screen_pin: GPIO22 # Loctek "Screen Pin", used for data transfer
+  # Adjust for Safety/Convenience
+  min_height: "70" # cm
+  max_height: "115" # cm
+  ### Light-related settings
+  led_r_pin: GPIO4
+  led_r_inverted: "true"
+  led_g_pin: GPIO16
+  led_g_inverted: "true"
+  led_b_pin: GPIO17
+  led_b_inverted: "true"
+  led_backlight_pin: GPIO21
+  led_backlight_inverted: "false"
+  ### SPI-related pins for diaplay and touchscreen
+  clk_display: GPIO14
+  mosi_display: GPIO13
+  miso_display: GPIO12
+  clk_touchscreen: GPIO25
+  mosi_touchscreen: GPIO32
+  miso_touchscreen: GPIO39
+  # DC / Data&Command for display
+  dc_display: GPIO2
+  # CS-Pins
+  cs_display: GPIO15
+  cs_touchscreen: GPIO33
+external_components:
+  source: github://iMicknl/LoctekMotion_IoT
+  components: [ loctekmotion_desk_height ]
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+esphome:
+  name: ${name}
+  friendly_name: ${device_name}
+  comment: Used to control your ${manufacturer} ${model} standing desk via Home Assistant.
+
+  # Wake Desk by sending the button_wake_screen command
+  # This will pull the current height after boot
+  on_boot:
+    - priority: 800
+      then:
+        - light.turn_off: back_light
+    - priority: 600
+      then:
+        - button.press: button_wake_screen
+
+# Enable logging
+logger:
+  baud_rate: 0 # disables output on hardware UART
+  level: WARN # set to DEBUG, if needed
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: ${encryption_key}
+
+ota:
+  platform: esphome
+  password: ${ota_encryption_key}
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${ap_fallback_ssid}
+    password: ${ap_fallback_password}
+  power_save_mode: LIGHT
+
+captive_portal:
+
+uart:
+  - id: desk_uart
+    baud_rate: ${baud_rate}
+    tx_pin: ${loctekmotion_tx_pin}
+    rx_pin: ${loctekmotion_rx_pin}
+
+sensor:   
+  - platform: wifi_signal
+    name: "Wifi Signal"
+    update_interval: 300s  
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_s
+    update_interval: 15s
+  - platform: loctekmotion_desk_height
+    id: "desk_height"
+    name: Desk Height
+    on_value_range:
+    - below: ${min_height}
+      then:
+        - switch.turn_off: switch_down
+    - above: ${max_height}
+      then:
+        - switch.turn_off: switch_up
+    on_value:
+      then:
+        - cover.template.publish:
+            id: desk_cover
+            position: !lambda |-
+                // The sensor outputs values from min_height (cm) to max_height (cm)
+                // We need to translate this to 0 - 1 scale.
+                float position = (float(x) - float(${min_height})) / (float(${max_height}) - float(${min_height}));
+                return position;
+        - component.update: set_desk_height
+
+switch:
+  - platform: gpio
+    name: "Virtual Screen" # PIN20
+    pin:
+      number: ${loctekmotion_screen_pin}
+      mode: OUTPUT
+    restore_mode: ALWAYS_ON
+    entity_category: "config"
+    internal: true
+
+  - platform: uart
+    name: "Up"
+    id: switch_up
+    icon: mdi:arrow-up-bold
+    data: [0x9b, 0x06, 0x02, 0x01, 0x00, 0xfc, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+
+  - platform: uart
+    name: "Down"
+    id: switch_down
+    icon: mdi:arrow-down-bold
+    data: [0x9b, 0x06, 0x02, 0x02, 0x00, 0x0c, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+
+  - platform: uart
+    name: "Alarm off"
+    id: switch_alarm
+    icon: mdi:alarm
+    data: [0x9b, 0x06, 0x02, 0x40, 0x00, 0xAC, 0x90, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    on_turn_on:
+      - delay: 3000ms
+      - switch.turn_off: switch_alarm
+    entity_category: "config"
+
+  - platform: uart
+    name: "Child Lock"
+    id: switch_child_lock
+    icon: mdi:account-lock
+    data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    on_turn_on:
+      - delay: 5000ms
+      - switch.turn_off: switch_child_lock
+    entity_category: "config"
+
+button:          
+  - platform: template
+    name: "Preset 1"
+    id: preset_1
+    icon: mdi:numeric-1-box
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d]
+
+  - platform: template
+    name: "Preset 2"
+    id: preset_2
+    icon: mdi:numeric-2-box
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d]
+
+  - platform: template
+    name: "Sit" # Preset 3 on some control panels
+    icon: mdi:chair-rolling
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d]
+
+  - platform: template
+    name: "Stand" # Preset 4 on some control panels
+    icon: mdi:human-handsup
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
+
+  - platform: template
+    name: "Memory"
+    id: button_m
+    icon: mdi:alpha-m-box
+    entity_category: "config"
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+
+  - platform: template
+    name: "Wake Screen"
+    id: button_wake_screen
+    icon: mdi:gesture-tap-button
+    entity_category: "config"
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+
+  - platform: template
+    name: "Alarm"
+    id: button_alarm
+    icon: mdi:alarm
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x40, 0x00, 0xAC, 0x90, 0x9d]
+
+  - platform: restart
+    name: "Restart"
+    entity_category: "config"
+globals:
+  - id: preset_1_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: preset_2_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: button3_pressed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: button4_pressed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: desk_moving
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: touch_enabled
+    type: bool
+    restore_value: no
+    initial_value: "true"
+cover:
+  - platform: template
+    id: "desk_cover"
+    icon: mdi:desk # or mdi:human-male-height-variant
+    name: "Desk"
+    device_class: blind # makes it easier to integrate with Google/Alexa
+    has_position: true
+    position_action:
+      - if:
+          condition:
+            - lambda: !lambda |-
+                return pos > id(desk_cover).position;
+          then:
+            - cover.open: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position  >= pos;
+            - cover.stop: desk_cover
+          else:
+            - cover.close: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position <= pos;
+            - cover.stop: desk_cover
+    stop_action:
+      - switch.turn_off: switch_up
+      - switch.turn_off: switch_down
+    open_action:
+      - switch.turn_off: switch_down
+      - switch.turn_on: switch_up
+    close_action:
+      - switch.turn_off: switch_up
+      - switch.turn_on: switch_down
+    optimistic: false
+number:
+  - platform: template
+    name: "Desk Height"
+    id: set_desk_height
+    min_value: ${min_height}
+    max_value: ${max_height}
+    icon: "mdi:counter"
+    unit_of_measurement: "cm"
+    device_class: "distance"
+    step: 0.1
+    lambda: !lambda |-
+      return id(desk_height).state;
+    set_action:
+      - if:
+          condition:
+            - lambda: !lambda |-
+                return x > id(desk_height).state;
+          then:
+            - cover.open: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_height).state  >= x;
+            - cover.stop: desk_cover
+          else:
+            - cover.close: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_height).state <= x;
+            - cover.stop: desk_cover
+    on_value:
+      - if:
+          condition: # if neither button 3 or 4 is pressed, then update the screen
+            - lambda: !lambda |-
+                return (id(button3_pressed)&&id(button4_pressed));
+          then:
+            - component.update: my_display #only update if no button is pressed, or its too slow
+
+# Adjust touchscreen touch areas if needed
+binary_sensor:
+  - platform: status
+    name: "Node Status"
+    id: system_status
+  - platform: touchscreen
+    name: Button 1  # Preset 1
+    id: touch_button1
+    internal: true
+    x_min: 53
+    x_max: 131    
+    y_min: 18
+    y_max: 63
+    on_press:
+      - button.press: preset_1
+      - lambda: |-
+          bool moving = id(desk_moving);
+          id(preset_2_active) = false;
+          id(preset_1_active) = !moving;
+      - script.stop: desk_moving_during_preset
+      - script.execute: desk_moving_during_preset
+  - platform: touchscreen
+    name: Button 2  # Preset 2
+    id: touch_button2
+    internal: true
+    x_min: 53
+    x_max: 131  
+    y_min: 72
+    y_max: 115    
+    on_press:
+      - button.press: preset_2
+      - lambda: |-
+          bool moving = id(desk_moving);
+          id(preset_1_active) = false;
+          id(preset_2_active) = !moving;
+      - script.stop: desk_moving_during_preset
+      - script.execute: desk_moving_during_preset
+  - platform: touchscreen
+    name: Button 3  # Up
+    id: touch_button3
+    internal: true
+    x_min: 53
+    x_max: 131   
+    y_min: 126
+    y_max: 169
+    on_press:
+      - script.stop: desk_moving_during_preset
+      - lambda: |-
+          bool can_move = id(desk_height).state < ${max_height};
+          id(preset_1_active) = false;
+          id(preset_2_active) = false;
+          id(button4_pressed) = false;
+          id(button3_pressed) = can_move;
+          id(desk_moving) = can_move;
+          if (can_move) id(switch_up).turn_on();
+    on_release:
+      lambda: |-
+        id(button3_pressed) = false;
+        id(desk_moving) = false;
+        id(switch_up).turn_off();
+  - platform: touchscreen
+    name: Button 4  # Down
+    id: touch_button4
+    internal: true
+    x_min: 53
+    x_max: 131     
+    y_min: 178
+    y_max: 224
+    on_press:
+      - script.stop: desk_moving_during_preset
+      - lambda: |-
+          bool can_move = id(desk_height).state > ${min_height};
+          id(preset_1_active) = false;
+          id(preset_2_active) = false;
+          id(button3_pressed) = false;
+          id(button4_pressed) = can_move;
+          id(desk_moving) = can_move;
+          if (can_move) id(switch_down).turn_on();
+    on_release:
+      lambda: |-
+        id(button4_pressed) = false;
+        id(desk_moving) = false;
+        id(switch_down).turn_off();
+text_sensor:
+  - platform: template
+    name: "Uptime (formatted)"
+    lambda: |-
+      uint32_t dur = id(uptime_s).state;
+      int dys = dur / 86400;
+      int hrs = (dur % 86400) / 3600;
+      int mnts = (dur % 3600) / 60;
+      int secs = dur % 60;
+      char buffer[17];
+      sprintf(buffer, "%ud %02uh %02um %02us", dys, hrs, mnts, secs);
+      return {buffer};
+    icon: mdi:clock-start
+    update_interval: 60s
+
+spi:
+  - id: spi_display
+    clk_pin: ${clk_display}
+    mosi_pin: ${mosi_display}
+    miso_pin: ${miso_display}
+  - id: spi_touchscreen
+    clk_pin: ${clk_touchscreen}
+    mosi_pin: ${mosi_touchscreen}
+    miso_pin: ${miso_touchscreen}
+output:
+  - platform: ledc
+    id: output_backlight
+    pin: ${led_backlight_pin}
+    inverted: ${led_backlight_inverted}
+  - platform: ledc
+    id: output_red
+    pin: ${led_r_pin}
+    inverted: ${led_r_inverted}
+  - platform: ledc
+    id: output_green
+    pin: ${led_g_pin}
+    inverted: ${led_g_inverted}
+  - platform: ledc
+    id: output_blue
+    pin: ${led_b_pin}
+    inverted: ${led_b_inverted}
+
+light:
+  - platform: monochromatic
+    output: output_backlight
+    name: "Power Display Backlight"
+    id: back_light
+    restore_mode: ALWAYS_OFF        
+  - platform: rgb
+    name: LED
+    red: output_red
+    id: led
+    green: output_green
+    blue: output_blue
+    restore_mode: ALWAYS_OFF    
+
+touchscreen:
+  platform: xpt2046
+  spi_id: spi_touchscreen
+  cs_pin: ${cs_touchscreen}
+  interrupt_pin: GPIO36
+  update_interval: 50ms
+  threshold: 400
+  on_touch:  
+    - if:
+        condition:
+          light.is_on: back_light
+        then:
+          - lambda: |-
+                ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+                    touch.x,
+                    touch.y,
+                    touch.x_raw,
+                    touch.y_raw
+                    );
+    - script.stop: backlight_timer
+    - script.execute: backlight_timer
+  calibration:
+    x_min: 280
+    x_max: 3860
+    y_min: 340
+    y_max: 3860
+  transform:
+    mirror_x: true
+    mirror_y: false     
+          
+color:
+  - id: ACTIVE
+    hex: "FEC600"  
+  - id: INACTIVE
+    hex: "808080"  
+font: 
+
+  # gfonts://family[@weight]
+  - file: "gfonts://Roboto@400"
+    id: big_text
+    size: 60
+    bpp: 4
+    glyphs: &glyph_list ['&', '@', '!', ',', '.', '?', '"', '%', '(', ')', '+', '-', '_', ':', '°', '0',
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E',
+      'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+      'T', 'U', 'V', 'W', 'X', 'Y', 'Z', ' ', 'a', 'b', 'c', 'd', 'e', 'f',
+      'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+      'u', 'v', 'w', 'x', 'y', 'z','å', 'Ä', 'ä', 'Ö', 'ö', 'Ü', 'ü', '/'] 
+
+  - file: "gfonts://Roboto@400"
+    id: medium_text
+    size: 32
+    bpp: 4
+    glyphs: *glyph_list
+
+  - file: "gfonts://Roboto@400"
+    id: notice_text
+    size: 16
+    bpp: 4
+    glyphs: *glyph_list
+
+  - file: "gfonts://Roboto@400"
+    id: label
+    size: 13
+    bpp: 4
+    glyphs: *glyph_list        
+
+  - file: 'fonts/materialdesignicons-webfont.ttf' # Get them from https://github.com/Templarian/MaterialDesign-Webfont/blob/master/fonts/materialdesignicons-webfont.ttf and copy to a folder /fonts
+    id: materialdesign_icons
+    size: 35
+    glyphs: ["\U000f1061", "\U000f02e6", "\U000f005d", "\U000f005e", "\U000f0045", "\U000f0046"] # Examples here: https://gist.github.com/kudzidube7/5798f80e70b9a243186c183a119adce6
+
+time:
+  # homeassistant takes some time to update, but feel free to change it, you might need a different offset for ntp/HA time
+  # - platform: homeassistant 
+  #   id: current_time
+  #   on_time:
+  #     - seconds: 5
+  #       minutes: /1 # Update every minute
+  #       then:
+  #         - component.update: my_display
+  - platform: sntp
+    id: current_time
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+    on_time:
+      - seconds: 5
+        minutes: 1
+        hours: /2
+        then:
+          - component.update: my_display
+    on_time_sync:
+      then:
+        - logger.log: "Zeit wurde erfolgreich synchronisiert!"
+display:
+  - platform: ili9xxx
+    model: ILI9341
+    id: my_display
+    spi_id: spi_display
+    dc_pin: ${dc_display}
+    cs_pin: ${cs_display}
+    show_test_card: false # For debugging
+    rotation: 180
+    invert_colors: false
+    data_rate: 40MHz
+    auto_clear_enabled: true
+    update_interval: 5s
+    color_palette: 8BIT  
+    dimensions:
+      width: 320
+      height: 240
+
+    pages:      
+      - id: lockscreen_page
+        lambda: |-
+          constexpr std::array<const char*, 7> day_map = {"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"};
+          constexpr std::array<const char*, 12> month_map = {"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"};
+
+          auto now = id(current_time).now();  
+          auto white = Color(255, 255, 255);
+          int b_pos_y = 170;
+          int center_x = it.get_width() / 2;
+
+          struct Button {
+              int offset;
+              bool active;
+              const char* icon_active;
+              const char* icon_inactive;
+              const char* label;
+          };
+
+          std::array<Button, 4> buttons = {{
+              {-105, id(preset_1_active), "\U000f1061", "\U000f1061", "Preset 1"},
+              {-35, id(preset_2_active), "\U000f02e6", "\U000f02e6", "Preset 2"},
+              {35, id(button3_pressed), "\U000f005e", "\U000f005d", "Hoch"},
+              {105, id(button4_pressed), "\U000f0046", "\U000f0045", "Runter"}
+          }};
+
+          for (const auto& btn : buttons) {
+              int x_pos = center_x + btn.offset;
+              it.filled_circle(x_pos, b_pos_y, 30, btn.active ? id(ACTIVE) : id(INACTIVE));
+              it.printf(x_pos, b_pos_y, id(materialdesign_icons), btn.active ? id(Color::WHITE) : id(ACTIVE), TextAlign::CENTER, btn.active ? btn.icon_active : btn.icon_inactive);
+              it.printf(x_pos, b_pos_y + 45, id(label), id(Color::WHITE), TextAlign::CENTER, btn.label);
+          }
+
+          it.printf(center_x, it.get_height()/2 - 90, id(notice_text), id(Color::WHITE), TextAlign::CENTER, "%s, %d. %s", day_map[now.day_of_week -1], now.day_of_month, month_map[now.month - 1]);
+          it.strftime(center_x, it.get_height()/2 - 45, id(big_text), id(Color::WHITE), TextAlign::CENTER, "%H:%M", now);
+          it.printf(center_x, it.get_height()/2, id(medium_text), id(Color::WHITE), TextAlign::CENTER, "Höhe: %.1f cm", id(desk_height).state);
+
+
+# This is the script for turn off the backlight after some seconds of inactivity
+script:
+  - id: backlight_timer
+    then:
+    - light.turn_on:
+        id: back_light
+        brightness: 100%
+    - delay: 30s
+    - light.turn_on:
+        id: back_light
+        brightness: 50%
+    - delay: 10s
+    - light.turn_off: back_light
+    - button.press: button_wake_screen # refresh data from the loctek-controller before going into "sleep"
+    - globals.set:
+        id: touch_enabled
+        value: "false"
+  - id: desk_moving_during_preset
+    then:
+    - globals.set:
+        id: desk_moving
+        value: "true"
+    - delay: !lambda "if (id(preset_1_active) or id(preset_2_active)) return 15000; else return 0;"
+    - globals.set:
+        id: desk_moving
+        value: "false"
