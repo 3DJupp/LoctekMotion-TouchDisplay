@@ -1,0 +1,971 @@
+substitutions:
+  device_name: E7Q - LVGL
+  manufacturer: Flexispot
+  model: E7Q
+  name: office-desk-flexispot-e7q
+  ap_fallback_ssid: "Loctekmotioncontroller"
+  ap_fallback_password: "YourVeryOwnFallbackPW"
+  encryption_key: "PleaseReplaceThisText"
+  ota_encryption_key: "PleaseReplaceThisTextToo"
+  baud_rate: "9600"
+  loctekmotion_tx_pin: GPIO1 # Hardware UART
+  loctekmotion_rx_pin: GPIO3 # Hardware UART
+  loctekmotion_screen_pin: GPIO22 # Loctek "Screen Pin", used for data transfer
+  # Adjust for Safety/Convenience
+  min_height: "70" # cm
+  max_height: "115" # cm
+  ### Light-related settings
+  led_r_pin: GPIO4
+  led_r_inverted: "true"
+  led_g_pin: GPIO16
+  led_g_inverted: "true"
+  led_b_pin: GPIO17
+  led_b_inverted: "true"
+  led_backlight_pin: GPIO21
+  led_backlight_inverted: "false"
+  ### SPI-related pins for diaplay and touchscreen
+  clk_display: GPIO14
+  mosi_display: GPIO13
+  miso_display: GPIO12
+  clk_touchscreen: GPIO25
+  mosi_touchscreen: GPIO32
+  miso_touchscreen: GPIO39
+  # DC / Data&Command for display
+  dc_display: GPIO2
+  # CS-Pins
+  cs_display: GPIO15
+  cs_touchscreen: GPIO33
+  # specify own boot-logo, if wanted
+  bootlogo: "https://esphome.io/_static/favicon-512x512.png"
+external_components:
+  source: github://iMicknl/LoctekMotion_IoT
+  components: [ loctekmotion_desk_height ]
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+esphome:
+  name: ${name}
+  friendly_name: ${device_name}
+  comment: Used to control your ${manufacturer} ${model} standing desk via Home Assistant.
+
+  # Initial scripts, get height data, initialize screen etc.
+  on_boot:
+    - priority: 600
+      then:
+        - button.press: button_wake_screen
+        - light.turn_on:
+            id: back_light
+            brightness: 100%
+        - delay: 10s
+        - lvgl.widget.hide: boot_animation
+        - lvgl.page.show: main_page
+        - lvgl.resume
+    - priority: 200
+      then:
+        - script.execute: update_buttons
+        - script.execute: update_time
+        - script.execute: update_date
+        - script.execute: reset_preset_buttons # reset to preset, if set before (Stored in flash)
+
+# Enable logging
+logger:
+  baud_rate: 0
+  level: WARN # Or DEBUG if needed
+# Enable Home Assistant API
+api:
+  encryption:
+    key: ${encryption_key}
+  on_client_connected:
+    - if:
+        condition:
+          lambda: 'return (0 == client_info.find("Home Assistant "));'
+        then:
+          - lvgl.widget.show: icon_hastatus
+  on_client_disconnected:
+    - if:
+        condition:
+          lambda: 'return (0 == client_info.find("Home Assistant "));'
+        then:
+          - lvgl.widget.hide: icon_hastatus
+ota:
+  platform: esphome
+  password: ${ota_encryption_key}
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${ap_fallback_ssid}
+    password: ${ap_fallback_password}
+
+captive_portal:
+
+uart:
+  - id: desk_uart
+    baud_rate: ${baud_rate}
+    tx_pin: ${loctekmotion_tx_pin}
+    rx_pin: ${loctekmotion_rx_pin}
+
+sensor:
+  - platform: wifi_signal
+    name: "Wifi Signal"
+    update_interval: 300s  
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_s
+    update_interval: 15s
+  - platform: loctekmotion_desk_height
+    id: "desk_height"
+    name: Desk Height
+    on_value_range:
+    - below: ${min_height}
+      then:
+        - switch.turn_off: switch_down_HA
+        - lvgl.matrix.button.update:
+            id: button_down
+            control:
+              disabled: true
+    - above: ${min_height}
+      then:
+        - lvgl.matrix.button.update:
+            id: button_down
+            control:
+              disabled: false
+    - above: ${max_height}
+      then:
+        - switch.turn_off: switch_up_HA
+        - lvgl.matrix.button.update:
+            id: button_up
+            control:
+              disabled: true
+    - below: ${max_height}
+      then:
+        - lvgl.matrix.button.update:
+            id: button_up
+            control:
+              disabled: false
+    on_value:
+      then:
+        - cover.template.publish:
+            id: desk_cover
+            position: !lambda |-
+                // The sensor outputs values from min_height (cm) to max_height (cm)
+                // We need to translate this to 0 - 1 scale.
+                float position = (float(x) - float(${min_height})) / (float(${max_height}) - float(${min_height}));
+                return position;
+        - component.update: set_desk_height
+
+switch:
+  - platform: gpio
+    name: "Virtual Screen" # PIN20
+    pin:
+      number: ${loctekmotion_screen_pin}
+      mode: OUTPUT
+    restore_mode: ALWAYS_ON
+    entity_category: "config"
+    internal: true
+    
+  - platform: template
+    name: "Up"
+    id: switch_up_HA
+    icon: mdi:arrow-up-bold
+    internal: true
+    turn_on_action:
+      - switch.turn_on: switch_up
+      - lambda: !lambda |-
+          id(current_preset)=5;
+      - script.execute: reset_preset_buttons
+    turn_off_action:
+      - switch.turn_off: switch_up
+
+  - platform: uart
+    name: "Up - UART"
+    id: switch_up
+    data: [0x9b, 0x06, 0x02, 0x01, 0x00, 0xfc, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+
+  - platform: template
+    name: "Down"
+    id: switch_down_HA
+    icon: mdi:arrow-down-bold
+    internal: true
+    turn_on_action:
+      - switch.turn_on: switch_down
+      - lambda: !lambda |-
+          id(current_preset)=0;
+      - script.execute: reset_preset_buttons
+    turn_off_action:
+      - switch.turn_off: switch_down
+
+  - platform: uart
+    name: "Down - UART"
+    id: switch_down
+    data: [0x9b, 0x06, 0x02, 0x02, 0x00, 0x0c, 0xa0, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    internal: true
+
+  - platform: uart
+    name: "Alarm off"
+    id: switch_alarm
+    icon: mdi:alarm
+    data: [0x9b, 0x06, 0x02, 0x40, 0x00, 0xAC, 0x90, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    on_turn_on:
+      - delay: 3000ms
+      - switch.turn_off: switch_alarm
+    entity_category: "config"
+
+  - platform: uart
+    name: "Child Lock"
+    id: switch_child_lock
+    icon: mdi:account-lock
+    data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+    uart_id: desk_uart
+    send_every: 108ms
+    on_turn_on:
+      - delay: 5000ms
+      - switch.turn_off: switch_child_lock
+    entity_category: "config"
+
+  - platform: template
+    name: Antiburn
+    id: switch_antiburn
+    icon: mdi:monitor-shimmer
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - logger.log: "Starting Antiburn"
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+      - lvgl.pause:
+          show_snow: true
+    turn_off_action:
+      - logger.log: "Stopping Antiburn"
+      - if:
+          condition: lvgl.is_paused
+          then:
+            - lvgl.resume:
+            - lvgl.widget.redraw:
+
+button:
+  - platform: template
+    name: "Preset 1 - UART"
+    id: preset_1
+    internal: true
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d]
+
+  - platform: template
+    name: "Preset 1" # Button exposed to HA
+    id: preset_1_HA
+    icon: mdi:numeric-1-box
+    on_press:          
+      - button.press: preset_1
+      - lambda: !lambda |-
+          id(current_preset)=1;
+      - lvgl.matrix.button.update:
+          id: button_preset_1
+          control:
+            checked: true
+
+  - platform: template
+    name: "Preset 2 - UART"
+    id: preset_2
+    internal: true
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d]
+    
+  - platform: template
+    name: "Preset 2" # Button exposed to HA
+    id: preset_2_HA
+    icon: mdi:numeric-2-box
+    on_press:          
+      - button.press: preset_2
+      - lambda: !lambda |-
+          id(current_preset)=2;
+      - lvgl.matrix.button.update:
+          id: button_preset_2
+          control:
+            checked: true
+
+  - platform: template
+    name: "Sit - UART" # Preset 3 on some control panels
+    id: preset_sit
+    internal: true
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d]
+
+  - platform: template
+    name: "Sit" # Button exposed to HA
+    id: preset_sit_HA
+    icon: mdi:chair-rolling
+    on_press:          
+      - button.press: preset_sit
+      - lambda: !lambda |-
+          id(current_preset)=3;
+      - lvgl.matrix.button.update:
+          id: button_preset_sit
+          control:
+            checked: true
+
+  - platform: template
+    name: "Stand - UART" # Preset 4 on some control panels
+    id: preset_stand
+    internal: true
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
+
+  - platform: template
+    name: "Stand" # Button exposed to HA
+    id: preset_stand_HA
+    icon: mdi:human-handsup
+    on_press:          
+      - button.press: preset_stand
+      - lambda: !lambda |-
+          id(current_preset)=4;
+      - lvgl.matrix.button.update:
+          id: button_preset_stand
+          control:
+            checked: true
+
+  - platform: template
+    name: "Memory"
+    id: button_m
+    icon: mdi:alpha-m-box
+    entity_category: "config"
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x20, 0x00, 0xac, 0xb8, 0x9d]
+
+  - platform: template
+    name: "Wake Screen"
+    id: button_wake_screen
+    icon: mdi:gesture-tap-button
+    entity_category: "config"
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x00, 0x00, 0x6c, 0xa1, 0x9d]
+
+  - platform: template
+    name: "Alarm"
+    id: button_alarm
+    icon: mdi:alarm
+    on_press:
+      - uart.write:
+          id: desk_uart
+          data: [0x9b, 0x06, 0x02, 0x40, 0x00, 0xAC, 0x90, 0x9d]
+
+  - platform: restart
+    name: "Restart"
+    entity_category: "config"
+globals:
+  - id: current_preset
+    type: int
+    restore_value: yes
+  - id: desk_moving
+    type: bool
+    restore_value: no
+    initial_value: "false"
+cover:
+  - platform: template
+    id: "desk_cover"
+    icon: mdi:desk # or mdi:human-male-height-variant
+    name: "Desk"
+    device_class: blind # makes it easier to integrate with Google/Alexa
+    has_position: true
+    position_action:
+      - if:
+          condition:
+            - lambda: !lambda |-
+                return pos > id(desk_cover).position;
+          then:
+            - cover.open: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position  >= pos;
+            - cover.stop: desk_cover
+          else:
+            - cover.close: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_cover).position <= pos;
+            - cover.stop: desk_cover
+    stop_action:
+      - switch.turn_off: switch_up_HA
+      - switch.turn_off: switch_down_HA
+    open_action:
+      - switch.turn_off: switch_down_HA
+      - switch.turn_on: switch_up_HA
+    close_action:
+      - switch.turn_off: switch_up_HA
+      - switch.turn_on: switch_down_HA
+    optimistic: false
+number:
+  - platform: template
+    name: "Desk Height"
+    id: set_desk_height
+    min_value: ${min_height}
+    max_value: ${max_height}
+    icon: "mdi:counter"
+    unit_of_measurement: "cm"
+    device_class: "distance"
+    step: 0.1
+    lambda: !lambda |-
+      return id(desk_height).state;
+    set_action:
+      - if:
+          condition:
+            - lambda: !lambda |-
+                return x > id(desk_height).state;
+          then:
+            - cover.open: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_height).state  >= x;
+            - cover.stop: desk_cover
+          else:
+            - cover.close: desk_cover
+            - wait_until:
+                lambda: |-
+                  return id(desk_height).state <= x;
+            - cover.stop: desk_cover
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: height_label
+            text:
+              format: "Höhe: %.1f cm"
+              args: [id(desk_height).state]  
+        - lvgl.bar.update:
+            id: bar_height
+            value: !lambda return (id(desk_height).state);
+        - script.execute: serialportstatus
+
+binary_sensor:
+  - platform: status
+    name: "Node Status"
+    id: system_status
+text_sensor:
+  # Expose Uptime as a sensor
+  - platform: template
+    name: "Uptime (formatted)"
+    lambda: |-
+      uint32_t dur = id(uptime_s).state;
+      int dys = dur / 86400;
+      int hrs = (dur % 86400) / 3600;
+      int mnts = (dur % 3600) / 60;
+      int secs = dur % 60;
+      char buffer[17];
+      sprintf(buffer, "%ud %02uh %02um %02us", dys, hrs, mnts, secs);
+      return {buffer};
+    icon: mdi:clock-start
+    update_interval: 60s
+  # Expose ESPHome version as sensor
+  - platform: version
+    name: ${device_name} ESPHome Version
+    icon: mdi:uptime
+
+spi:
+  - id: spi_display
+    clk_pin: ${clk_display}
+    mosi_pin: ${mosi_display}
+    miso_pin: ${miso_display}
+  - id: spi_touchscreen
+    clk_pin: ${clk_touchscreen}
+    mosi_pin: ${mosi_touchscreen}
+    miso_pin: ${miso_touchscreen}
+output:
+  - platform: ledc
+    id: output_backlight
+    pin: ${led_backlight_pin}
+    inverted: ${led_backlight_inverted}
+  - platform: ledc
+    id: output_red
+    pin: ${led_r_pin}
+    inverted: ${led_r_inverted}
+  - platform: ledc
+    id: output_green
+    pin: ${led_g_pin}
+    inverted: ${led_g_inverted}
+  - platform: ledc
+    id: output_blue
+    pin: ${led_b_pin}
+    inverted: ${led_b_inverted}
+
+light:
+  - platform: monochromatic
+    name: "Power Display Backlight"
+    id: back_light
+    icon: mdi:monitor
+    output: output_backlight
+    restore_mode: ALWAYS_OFF  
+  - platform: rgb
+    name: LED
+    id: led
+    icon: mdi:led-off
+    red: output_red
+    green: output_green
+    blue: output_blue
+    restore_mode: ALWAYS_OFF 
+
+touchscreen:
+  platform: xpt2046
+  spi_id: spi_touchscreen
+  cs_pin: ${cs_touchscreen}
+  interrupt_pin: GPIO36
+  update_interval: 50ms
+  threshold: 400
+  on_touch:  
+    - lambda: |-
+          ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
+              touch.x,
+              touch.y,
+              touch.x_raw,
+              touch.y_raw
+              );
+  calibration:
+    x_min: 280
+    x_max: 3860
+    y_min: 340
+    y_max: 3860
+  transform:
+    swap_xy: true
+    mirror_x: false
+    mirror_y: false
+ 
+color:
+  - id: Status_Text
+    hex: "00B7EB"
+  - id: Preset_pressed
+    hex: "003C4D"
+  - id: Height_pressed
+    hex: "CAF0FB"
+font: 
+
+  # gfonts://family[@weight]
+  - file: "gfonts://Roboto@400"
+    id: notice_text
+    size: 14
+    bpp: 4
+    glyphs: &glyph_list ['&', '@', '!', ',', '.', '?', '"', '%', '(', ')', '+', '-', '_', ':', '°', '0',
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E',
+      'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+      'T', 'U', 'V', 'W', 'X', 'Y', 'Z', ' ', 'a', 'b', 'c', 'd', 'e', 'f',
+      'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+      'u', 'v', 'w', 'x', 'y', 'z','å', 'Ä', 'ä', 'Ö', 'ö', 'Ü', 'ü', '/'] 
+
+  - file: "gfonts://Roboto@400"
+    id: medium_text
+    size: 32
+    bpp: 4
+    glyphs: *glyph_list
+
+  - file: "gfonts://Roboto@400"
+    id: big_text
+    size: 60
+    bpp: 4
+    glyphs: *glyph_list  
+
+image:
+  - file: ${bootlogo}
+    id: boot_logo
+    resize: 240x240
+    type: RGB565
+    transparency: alpha_channel
+
+time:
+  - platform: sntp
+    id: current_time
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+    on_time:
+      - seconds: /30
+        then:
+        - script.execute: update_time
+      - minutes: /30
+        then:
+        - script.execute: update_date
+display:
+  - platform: ili9xxx
+    model: ILI9341
+    id: my_display
+    spi_id: spi_display
+    dc_pin: ${dc_display}
+    cs_pin: ${cs_display}
+    rotation: 180
+    color_order: RGB
+    invert_colors: false
+    auto_clear_enabled: false
+    update_interval: never
+    data_rate: 40MHz
+    dimensions:
+      width: 320
+      height: 240
+
+lvgl:
+  buffer_size: 25%
+  on_resume:
+    - lvgl.page.show: main_page
+    - switch.turn_off: switch_antiburn
+    - button.press: button_wake_screen
+    - light.turn_on:
+        id: back_light
+        brightness: 100%
+  on_idle:
+    - timeout: 30s # Main screen is active for that time
+      then:
+        - lvgl.page.show: 
+            id: screensaver
+            animation: FADE_OUT
+            time: 500ms
+        - light.turn_on:
+            id: back_light
+            brightness: 50%
+    - timeout: 60s # Screen saver was active for that time (absolute times)
+      then:
+        - light.turn_off: back_light
+        - delay: 500ms
+        - switch.turn_on: switch_antiburn
+# Example gradient showing full hue range.
+  gradients:
+    - id: gradient_bar
+      direction: hor
+      dither: none
+      stops:
+        - color: 0xFF0000
+          position: 0
+        - color: 0xFFFF00
+          position: 42
+        - color: 0x00FF00
+          position: 84
+        - color: 0x00FFFF
+          position: 127
+        - color: 0x0000FF
+          position: 169
+        - color: 0xFF00FF
+          position: 212
+        - color: 0xFF0000
+          position: 255
+  pages:
+    - id: boot_page
+      widgets:
+        - obj:
+            id: boot_animation
+            x: 0
+            y: 0
+            width: 100%
+            height: 100%
+            bg_color: 0xffffff
+            bg_opa: COVER
+            radius: 0
+            pad_all: 0
+            border_width: 0
+            widgets:
+              - image:
+                  align: CENTER
+                  src: boot_logo
+                  zoom: 0.7
+                  y: -35
+              - spinner:
+                  align: CENTER
+                  y: 95
+                  height: 50
+                  width: 50
+                  spin_time: 1s
+                  arc_length: 60deg
+                  arc_width: 8
+                  indicator:
+                    arc_color: 0x18bcf2
+                    arc_width: 8
+            on_press:
+              - light.turn_on:
+                  id: back_light
+                  brightness: 100%
+              - lvgl.page.show: main_page
+    - id: main_page
+      widgets:
+        # Status widgets
+        - label:
+            text: "\uF1EB"
+            id: icon_hastatus
+            hidden: true
+            align: top_right
+            x: 0
+            y: 0
+            text_align: right
+            text_color: Status_Text
+        - label:
+            text: "\uF074"
+            id: icon_serialportstatus
+            hidden: true
+            align: top_right
+            x: -20
+            y: 0
+            text_align: right
+            text_color: Status_Text
+        # Date
+        - label:
+            id: date_label
+            align: TOP_MID
+            text: "Date"
+            text_align: center
+            text_color: Status_Text
+            text_font: notice_text
+        # Clock
+        - label:
+            id: time_label
+            align: TOP_LEFT
+            text: "hh:mm"
+            text_align: left
+            text_color: Status_Text
+            text_font: notice_text
+        # First button matrix (presets)
+        - buttonmatrix:
+            id: matrix_presets
+            align: CENTER
+            y: -40 # adjust by height/2, so the second buttonmatrix will fit
+            height: 80
+            width: 100%
+            one_checked: true
+            bg_opa: transp
+            border_opa: transp
+            items:
+              pressed:
+                bg_color: Preset_pressed
+            rows:
+              - buttons:
+                - id: button_preset_1
+                  text: "Preset 1"
+                  control:
+                    checkable: true
+                  on_press: # Start Preset 1 (Sit)
+                    - button.press: preset_1
+                    - lambda: !lambda |-
+                        id(current_preset)=1;
+                - id: button_preset_2
+                  text: "Preset 2"
+                  control:
+                    checkable: true
+                  on_press: # Start Preset 2 (Stand)
+                    - button.press: preset_2
+                    - lambda: !lambda |-
+                        id(current_preset)=2;
+                - id: button_preset_sit
+                  text: "Sit"
+                  control:
+                    checkable: true
+                  on_press: # Start Preset Sit
+                    - button.press: preset_sit
+                    - lambda: !lambda |-
+                        id(current_preset)=3;
+                - id: button_preset_stand
+                  text: "Stand"
+                  control:
+                    checkable: true
+                  on_press: # Start Preset Stand
+                    - button.press: preset_stand
+                    - lambda: !lambda |-
+                        id(current_preset)=4;
+        # Second button matrix (up/down)
+        - buttonmatrix:
+            id: matrix_updown
+            align_to:
+              id: matrix_presets
+              align: OUT_BOTTOM_MID
+            width: 100%
+            height: 80
+            one_checked: true
+            bg_opa: transp
+            border_opa: transp
+            items:
+              pressed:
+                bg_color: Height_pressed
+            rows:
+              - buttons:
+                - id: button_up
+                  text: "Hoch"
+                  control:
+                    disabled: false
+                    popover: true
+                  on_press: # Trigger for the individual button, returning the checked state, current_preset=5
+                    - lambda: |-
+                        id(switch_up_HA).turn_on();
+                  on_release:
+                    lambda: |-
+                      id(switch_up_HA).turn_off();
+                - id: button_down
+                  text: "Runter"
+                  control:
+                    disabled: false
+                    popover: true
+                  on_press: # Trigger for the individual button, returning the checked state, current_preset=0
+                    - lambda: |-
+                        id(switch_down_HA).turn_on();
+                  on_release:
+                    lambda: |-
+                      id(switch_down_HA).turn_off();
+        - bar:
+            id: bar_height
+            align: BOTTOM_MID
+            width: 100%
+            min_value: ${min_height}
+            max_value: ${max_height}
+            bg_grad: gradient_bar
+        - label:
+            id: height_label
+            align: BOTTOM_MID
+            text_font: medium_text
+            y: -15
+    - id: screensaver
+      bg_color: 0xffffff
+      widgets:
+        - image:
+            align: CENTER
+            src: boot_logo
+        - label:
+            id: label_stby
+            text: "#FF0000 Tap to# #00FF00 wake up# #0000FF the screen#"
+            align: CENTER
+            long_mode: scroll_circular
+            text_font: big_text
+            width: 100%  # Nimmt die gesamte Breite des Displays ein
+            recolor: true
+      on_press: # Trigger for the individual button, returning the checked state
+        - light.turn_on:
+            id: back_light
+            brightness: 100%
+        - lvgl.page.show: main_page
+
+# Disables touch buttons if treshold is exceeded
+script:
+  - id: update_buttons
+    mode: restart
+    then:
+      - if:
+          condition:
+              - lambda: |-
+                  return id(desk_height).state >= ${max_height};
+          then:
+            - lvgl.matrix.button.update:
+                id: button_up
+                control:
+                  disabled: true
+      - if:
+          condition:
+              - lambda: |-
+                  return id(desk_height).state <= ${min_height};
+          then:
+            - lvgl.matrix.button.update:
+                id: button_down
+                control:
+                  disabled: true
+  - id: reset_preset_buttons
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_preset) == 1;'
+          then:
+            - lvgl.matrix.button.update:
+                id: button_preset_1
+                control:
+                  checked: true
+          else:
+            - lvgl.matrix.button.update:
+                id: button_preset_1
+                control:
+                  checked: false
+      - if:
+          condition:
+            lambda: 'return id(current_preset) == 2;'
+          then:
+            - lvgl.matrix.button.update:
+                id: button_preset_2
+                control:
+                  checked: true
+          else:
+            - lvgl.matrix.button.update:
+                id: button_preset_2
+                control:
+                  checked: false
+      - if:
+          condition:
+            lambda: 'return id(current_preset) == 3;'
+          then:
+            - lvgl.matrix.button.update:
+                id: button_preset_sit
+                control:
+                  checked: true
+          else:
+            - lvgl.matrix.button.update:
+                id: button_preset_sit
+                control:
+                  checked: false
+      - if:
+          condition:
+            lambda: 'return id(current_preset) == 4;'
+          then:
+            - lvgl.matrix.button.update:
+                id: button_preset_stand
+                control:
+                  checked: true
+          else:
+            - lvgl.matrix.button.update:
+                id: button_preset_stand
+                control:
+                  checked: false
+  - id: serialportstatus
+    mode: restart
+    then:
+      - lvgl.widget.show: icon_serialportstatus
+      - delay: 300s
+      - button.press: button_wake_screen
+      - delay: 10s
+      - lvgl.widget.hide: icon_serialportstatus
+  - id: update_time
+    mode: restart
+    then:
+      - lvgl.label.update:
+          id: time_label
+          text: !lambda |-
+            auto now = id(current_time).now();
+            // Uhrzeit aktualisieren
+            char time_buffer[10];
+            snprintf(time_buffer, sizeof(time_buffer), "%02d:%02d", now.hour, now.minute);
+            return time_buffer;
+  - id: update_date
+    mode: restart
+    then:
+        - lvgl.label.update:
+            id: date_label
+            text: !lambda |-
+              // Mappings für Wochentag und Monat (beides n-1)
+              constexpr std::array<const char*, 7> day_map = {"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"};
+              constexpr std::array<const char*, 12> month_map = {"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"};
+              auto now = id(current_time).now();
+              // Datum aktualisieren
+              char date_buffer[50];
+              snprintf(date_buffer, sizeof(date_buffer), "%s, %d. %s", day_map[now.day_of_week - 1], now.day_of_month, month_map[now.month - 1]);
+              return date_buffer;
