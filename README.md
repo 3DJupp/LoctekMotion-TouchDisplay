@@ -1,4 +1,7 @@
 # LoctekMotion-TouchDisplay
+
+![ESP32-2432s028-lvgl_UI](https://github.com/user-attachments/assets/7297aa28-2764-4822-9046-17c50a5d4c75)
+There is another version that is not using LVGL:
 ![LoctekMotion-TouchDisplay](https://github.com/user-attachments/assets/91f7d191-226c-42c4-b466-933921f3b59d)
 
 > [!NOTE]
@@ -11,19 +14,19 @@ Basically, I first found the [printable screen mount on Makerworld](https://make
 I got a **Flexispot E7Q**, also sold as **Odin/E7Q Pro** in the English-speaking market:  
 - [Flexispot Odin (EN)](https://www.flexispot.com/flexispot-odin-4-leg-standing-desk)  
 - [Flexispot E7Q (DE)](https://www.flexispot.de/elektrisch-hohenverstellbares-tischgestell-e7q.html)
-- It is using a HS13B-1 controller, pinout similar to the HS01BB-1
+- It is using a HS13B-1 controller, pinout similar to the HS01B-1
 
 ## Learnings  
 - If the table/controller does not respond, try **unplugging the RJ45 connectors** to your display(s), whether it's an ESP32 or the original Loctek MCU which is probably STMicroelectronics-based.
 - **Different versions of the "cheap yellow display"** – Mine has two USB inputs (USB-C and Micro-USB). The mounting holes were slightly off, so I used a 4/6mm drill to fix it (carefully).
 - **Set limits for the desk** - Or the table will crash or interfere with obstacles.  
 - **Disable the hardware UART** or at least the console on the ESP32.  
-- Not all pins are needed for this project. At least the **🟣purple, ⚪white, and 🟤brown wires** from the original cable are not required (**SWIM and Reset** are probably needed to program the controller in the factory).
+- Not all pins are needed for this project. At least the **🟣purple, ⚪white, 🟤brown** wires from the original cable are not required (**SWIM and Reset** are probably needed to program the controller in the factory).
 - If you're unsure about the pinout, open the original controller and write down the cable colors and its function. I can also recommend [the archive page](https://github.com/iMicknl/LoctekMotion_IoT/blob/main/archive/esphome/README.md) on the LoctekMotion_IoT-Prject or a simple [google search](https://github.com/iMicknl/LoctekMotion_IoT/issues/12) to find the correct pins.
 - The inbuilt display graphics from ESPHome are quite slow, so if you're having live values on the screen, then it is probably too slow. The new YAML for ESPHome features LVGL
 
 ## Required Parts
-You might need some physical and virtual tools, such as: a screwdriver, 3d-printer, [ESPHome](https://esphome.io/) installed within [Home Assistant](https://www.home-assistant.io/) and some technical knowledge (not really programming, but you should be able to read those YAML files etc)
+You might need some physical and virtual tools, such as: a screwdriver, pliers/something to trim the ethernet cable, 3d-printer, [ESPHome](https://esphome.io/) installed within [Home Assistant](https://www.home-assistant.io/) and some technical knowledge (not really programming, but you should be able to read those YAML files etc)
 | Part | Count | Price (€) | Comment |
 |------|------:|---------:|---------|
 | **ESP32-2432S028** | 1 | ~17€ | "cheap yellow display" 2*USB: [ESP32-2432S028R (eBay)](https://www.ebay.de/itm/365089053020) |
@@ -85,7 +88,7 @@ The following table shows the pin assignments for the **CN1** connector. Only **
 - JST (P5/CN1) wire colors might differ, please check it carefully.
 
 # Software
-I decided to hop on that train and use ESPHome (quite new for me). I will provide two YAMLs for which can easily installed from the Home Assistant GUI/ESPHome Addon.
+I decided to hop on that train and use ESPHome (quite new for me). I will provide two YAMLs which can easily installed from the Home Assistant GUI/ESPHome Addon.
 
 ## flexispot-e7q-esp32-2432s028-default_graphics
 This one is basically a fork of [ESPHome-touch-display-mount](https://github.com/akuehlewind/ESPHome-touch-display-mount) but instead of using other HA components, i enabled it to control the LoctekMotion/Flexispot Desk.<br>
@@ -103,11 +106,12 @@ Here you will find [flexispot-e7q-esp32-2432s028-default_graphics.yaml](YAML/fle
 ## flexispot-e7q-esp32-2432s028-lvgl
 Still there are many parts from [ESPHome-touch-display-mount](https://github.com/akuehlewind/ESPHome-touch-display-mount) and the [LoctekMotion IoT project](https://github.com/iMicknl/LoctekMotion_IoT) there is LVGL to control the display, buttons and its UI
 <br>Some special things about this one:
-- There is a bootlogo, thats not necessary at all
+- 16 Bit graphics and even faster then default_graphics
 - The bar-graph at the bottom indicated the current height. The min/max values are used from the yaml, even if its below or above that (those desks tend to overshoot a little)
-- Less lambdas for the buttons, but still: Buttons are deactivated if certain heights are below or above a treshold
+- Less lambdas for the buttons, buttons have automatic touch mapping and still: Buttons are deactivated if certain heights are below or above a treshold (Up/Down button)
+- More or less useful features, such as a bootlogo, status icons, burn-in prevention for the lcd, and even flash-stored information on the last preset beeing used
 - The UI is less appealing than the first version, but its more flexible and faster (live height-data during movement)
-- Its still WIP, so please take some time to validate which one you would like to use
+- Its still not a finished product, so please take some time to validate if thats fine for you
 
-> [!IMPORTANT]  
-> flexispot-e7q-esp32-2432s028-lvgl.yaml will be added soon
+Here you will find [flexispot-e7q-esp32-2432s028-lvgl.yaml](YAML/flexispot-e7q-esp32-2432s028-lvgl.yaml)
+
