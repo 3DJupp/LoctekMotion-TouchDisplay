@@ -71,6 +71,9 @@ The following table shows the pin assignments for the **P5** connector. **All fo
 | 3   | **RXD**       | 🟡 Yellow   | ⚪🔵 White-Blue |
 | 4   | **GND**       | 🟢 Green    | ⚪🟤 White-Brown |
 
+### Known Issue
+- If you use USB while connected to the desk-controller, UART0 is blocked. So please disconnect USB and power the CYD just via the Desk or use another serial port (which is sharing its pins with the Led) . [See that issue on the repo ](https://github.com/3DJupp/LoctekMotion-TouchDisplay/issues/1#issuecomment-2797995654)
+
 ## CN1/IO2 Pinout
 The following table shows the pin assignments for the **CN1** connector. Only **IO22** is required, GND is optional, already satisfied by the first connector.
 
