@@ -36,7 +36,46 @@ substitutions:
   cs_display: GPIO15
   cs_touchscreen: GPIO33
   # specify own boot-logo, if wanted
-  bootlogo: "https://esphome.io/_static/favicon-512x512.png"
+  bootlogo: "https://media.esphome.io/logo/vertical/Logo%20Vertical%20-%20Color%20on%20Dark%20Background.png"
+  materialdesignicons_webfont: "https://github.com/Templarian/MaterialDesign-Webfont/raw/refs/heads/master/fonts/materialdesignicons-webfont.ttf" # Source: URL / raw file @ GitHub
+  #materialdesignicons_webfont: "fonts/materialdesignicons-webfont.ttf" # Get it from https://github.com/Templarian/MaterialDesign-Webfont/blob/master/fonts/materialdesignicons-webfont.ttf and copy to the folder ./fonts
+
+globals:
+  - id: current_preset
+    type: int
+    restore_value: yes
+  - id: desk_moving
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # Remember the last known height across reboots (avoids an empty label on boot).
+  - id: last_known_height
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  # Cached disabled-state of the up/down buttons so the LVGL buttons are only
+  # redrawn on an actual state change (saves redraws on every measurement).
+  - id: up_disabled
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: down_disabled
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # Safety / dead-man for the touch up/down hold buttons.
+  # touch_hold = a manual hold move is currently active (started via touch).
+  # last_touch_ms = millis() of the most recent touch; refreshed while a finger
+  # is down. The watchdog stops the desk if this goes stale while holding.
+  - id: touch_hold
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: last_touch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
 external_components:
   source: github://iMicknl/LoctekMotion_IoT
   components: [ loctekmotion_desk_height ]
@@ -59,13 +98,21 @@ esphome:
         - light.turn_on:
             id: back_light
             brightness: 100%
-        - delay: 10s
+        - delay: 20s
         - lvgl.widget.hide: boot_animation
         - lvgl.page.show: main_page
         - lvgl.resume
     - priority: 200
       then:
-        - script.execute: update_buttons
+        # Show the last known height immediately until the first fresh measurement arrives.
+        - if:
+            condition:
+              lambda: 'return id(last_known_height) > 0;'
+            then:
+              - script.execute:
+                  id: update_height_display
+                  h: !lambda 'return id(last_known_height);'
+        - script.execute: update_limit_buttons
         - script.execute: update_time
         - script.execute: update_date
         - script.execute: reset_preset_buttons # reset to preset, if set before (Stored in flash)
@@ -73,7 +120,7 @@ esphome:
 # Enable logging
 logger:
   baud_rate: 0
-  level: WARN # Or DEBUG if needed
+  level: DEBUG # Or WARN if needed
 # Enable Home Assistant API
 api:
   encryption:
@@ -109,6 +156,41 @@ uart:
     baud_rate: ${baud_rate}
     tx_pin: ${loctekmotion_tx_pin}
     rx_pin: ${loctekmotion_rx_pin}
+    # Diagnostics: uncomment to debug. Logs the raw frames from the control box.
+    # If you see "00 00 00" while idle, the box is asleep (no height broadcast).
+    debug:
+      direction: RX
+      dummy_receiver: false
+      after:
+        delimiter: [0x9d]
+      sequence:
+        - lambda: UARTDebug::log_hex(direction, bytes, ' ');
+
+# Wake keepalive: keeps the control box awake so it keeps broadcasting the height.
+# The condition prevents the wake from interrupting an active up/down movement.
+interval:
+  - interval: 3s
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(switch_up).state && !id(switch_down).state;'
+          then:
+            - button.press: button_wake_screen
+
+  # Dead-man watchdog: if a touch-initiated hold move is active but no touch has
+  # been seen for >400 ms, force-stop. This is the backstop for the worst case
+  # where neither the LVGL button nor the touchscreen release event fired and the
+  # desk would otherwise keep driving into an end stop with no finger on screen.
+  - interval: 150ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(touch_hold) && (millis() - id(last_touch_ms) > 400);'
+          then:
+            - switch.turn_off: switch_up_HA
+            - switch.turn_off: switch_down_HA
+            - lambda: 'id(touch_hold) = false;'
+            - logger.log: "Dead-man watchdog: no touch -> desk stopped"
 
 sensor:
   - platform: wifi_signal
@@ -117,35 +199,10 @@ sensor:
   - platform: loctekmotion_desk_height
     id: "desk_height"
     name: Desk Height
-    on_value_range:
-    - below: ${min_height}
-      then:
-        - switch.turn_off: switch_down_HA
-        - lvgl.matrix.button.update:
-            id: button_down
-            control:
-              disabled: true
-    - above: ${min_height}
-      then:
-        - lvgl.matrix.button.update:
-            id: button_down
-            control:
-              disabled: false
-    - above: ${max_height}
-      then:
-        - switch.turn_off: switch_up_HA
-        - lvgl.matrix.button.update:
-            id: button_up
-            control:
-              disabled: true
-    - below: ${max_height}
-      then:
-        - lvgl.matrix.button.update:
-            id: button_up
-            control:
-              disabled: false
     on_value:
       then:
+        # Store every measurement as the last known height.
+        - lambda: 'id(last_known_height) = x;'
         - cover.template.publish:
             id: desk_cover
             position: !lambda |-
@@ -154,6 +211,23 @@ sensor:
                 float position = (float(x) - float(${min_height})) / (float(${max_height}) - float(${min_height}));
                 return position;
         - component.update: set_desk_height
+        # Update height label + bar through a single shared script (no duplicated code).
+        - script.execute:
+            id: update_height_display
+            h: !lambda 'return id(desk_height).state;'
+        # At the end stops, turn off the corresponding HA switch.
+        - if:
+            condition:
+              lambda: 'return x <= ${min_height};'
+            then:
+              - switch.turn_off: switch_down_HA
+        - if:
+            condition:
+              lambda: 'return x >= ${max_height};'
+            then:
+              - switch.turn_off: switch_up_HA
+        # Redraw the up/down buttons only on an actual state change.
+        - script.execute: update_limit_buttons
 
 switch:
   - platform: gpio
@@ -164,7 +238,7 @@ switch:
     restore_mode: ALWAYS_ON
     entity_category: "config"
     internal: true
-    
+
   - platform: template
     name: "Up"
     id: switch_up_HA
@@ -231,6 +305,19 @@ switch:
       - switch.turn_off: switch_child_lock
     entity_category: "config"
 
+  # Toggle the anti-collision sensitivity (key combination on the control box).
+  - platform: uart
+    name: "Anti Collision"
+    id: switch_anti_collision
+    icon: mdi:card-remove
+    data: [0x9b, 0x06, 0x02, 0x03, 0x00, 0x9C, 0xa1, 0x9d]
+    uart_id: desk_uart
+    send_every: 1ms
+    on_turn_on:
+      - delay: 6000ms
+      - switch.turn_off: switch_anti_collision
+    entity_category: "config"
+
   - platform: template
     name: Antiburn
     id: switch_antiburn
@@ -260,6 +347,9 @@ button:
     id: preset_1
     internal: true
     on_press:
+      # Wake first, then send, otherwise the sleeping box discards the single command.
+      - button.press: button_wake_screen
+      - delay: 300ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d]
@@ -268,7 +358,7 @@ button:
     name: "Preset 1" # Button exposed to HA
     id: preset_1_HA
     icon: mdi:numeric-1-box
-    on_press:          
+    on_press:
       - button.press: preset_1
       - lambda: !lambda |-
           id(current_preset)=1;
@@ -282,15 +372,18 @@ button:
     id: preset_2
     internal: true
     on_press:
+      # Wake first, then send.
+      - button.press: button_wake_screen
+      - delay: 300ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d]
-    
+
   - platform: template
     name: "Preset 2" # Button exposed to HA
     id: preset_2_HA
     icon: mdi:numeric-2-box
-    on_press:          
+    on_press:
       - button.press: preset_2
       - lambda: !lambda |-
           id(current_preset)=2;
@@ -304,6 +397,9 @@ button:
     id: preset_sit
     internal: true
     on_press:
+      # Wake first, then send.
+      - button.press: button_wake_screen
+      - delay: 300ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d]
@@ -312,7 +408,7 @@ button:
     name: "Sit" # Button exposed to HA
     id: preset_sit_HA
     icon: mdi:chair-rolling
-    on_press:          
+    on_press:
       - button.press: preset_sit
       - lambda: !lambda |-
           id(current_preset)=3;
@@ -326,6 +422,9 @@ button:
     id: preset_stand
     internal: true
     on_press:
+      # Wake first, then send.
+      - button.press: button_wake_screen
+      - delay: 300ms
       - uart.write:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d]
@@ -334,7 +433,7 @@ button:
     name: "Stand" # Button exposed to HA
     id: preset_stand_HA
     icon: mdi:human-handsup
-    on_press:          
+    on_press:
       - button.press: preset_stand
       - lambda: !lambda |-
           id(current_preset)=4;
@@ -372,17 +471,22 @@ button:
           id: desk_uart
           data: [0x9b, 0x06, 0x02, 0x40, 0x00, 0xAC, 0x90, 0x9d]
 
+  # Reset/recalibration. Drives "Down" for 20 s straight (= continuous press),
+  # until the desk dips below the bottom stop and completes the RST reset.
+  # Make sure there is nothing under the desk before running this.
+  - platform: template
+    name: "Desk Reset (hold Down)"
+    id: button_desk_reset
+    icon: mdi:backup-restore
+    entity_category: "config"
+    on_press:
+      - switch.turn_on: switch_down
+      - delay: 20s
+      - switch.turn_off: switch_down
+
   - platform: restart
     name: "Restart"
     entity_category: "config"
-globals:
-  - id: current_preset
-    type: int
-    restore_value: yes
-  - id: desk_moving
-    type: bool
-    restore_value: no
-    initial_value: "false"
 cover:
   - platform: template
     id: "desk_cover"
@@ -419,7 +523,7 @@ cover:
     optimistic: false
 number:
   - platform: template
-    name: "Desk Height"
+    name: "Set Desk Height"
     id: set_desk_height
     min_value: ${min_height}
     max_value: ${max_height}
@@ -448,14 +552,9 @@ number:
             - cover.stop: desk_cover
     on_value:
       then:
-        - lvgl.label.update:
-            id: height_label
-            text:
-              format: "Höhe: %.1f cm"
-              args: [id(desk_height).state]  
-        - lvgl.bar.update:
-            id: bar_height
-            value: !lambda return (id(desk_height).state);
+        - script.execute:
+            id: update_height_display
+            h: !lambda 'return id(desk_height).state;'
         - script.execute: serialportstatus
 
 binary_sensor:
@@ -500,7 +599,7 @@ light:
     id: back_light
     icon: mdi:monitor
     output: output_backlight
-    restore_mode: ALWAYS_OFF  
+    restore_mode: ALWAYS_OFF
   - platform: rgb
     name: LED
     id: led
@@ -508,7 +607,7 @@ light:
     red: output_red
     green: output_green
     blue: output_blue
-    restore_mode: ALWAYS_OFF 
+    restore_mode: ALWAYS_OFF
 
 touchscreen:
   platform: xpt2046
@@ -517,7 +616,7 @@ touchscreen:
   interrupt_pin: GPIO36
   update_interval: 50ms
   threshold: 400
-  on_touch:  
+  on_touch:
     - lambda: |-
           ESP_LOGI("cal", "x=%d, y=%d, x_raw=%d, y_raw=%0d",
               touch.x,
@@ -525,16 +624,25 @@ touchscreen:
               touch.x_raw,
               touch.y_raw
               );
+  on_update:
+    # Dead-man timestamp: refresh on every poll (~50ms) while at least one finger
+    # is down. Using on_update instead of the raw touchscreen release event keeps
+    # the motion smooth - brief pressure dropouts no longer chop the UART move -
+    # while the watchdog interval still force-stops ~400ms after the finger truly
+    # leaves (backstop for a missed LVGL button release).
+    - lambda: 'if (!touches.empty()) id(last_touch_ms) = millis();'
   calibration:
     x_min: 280
     x_max: 3860
     y_min: 340
     y_max: 3860
   transform:
-    swap_xy: true
+    # Matched to the display orientation (display swap_xy + lvgl rotation 270).
+    # Verified on this unit; adjust only if the touch lands on the wrong spot.
+    swap_xy: false
     mirror_x: false
-    mirror_y: false
- 
+    mirror_y: true
+
 color:
   - id: Status_Text
     hex: "00B7EB"
@@ -542,7 +650,7 @@ color:
     hex: "003C4D"
   - id: Height_pressed
     hex: "CAF0FB"
-font: 
+font:
 
   # gfonts://family[@weight]
   - file: "gfonts://Roboto@400"
@@ -554,7 +662,7 @@ font:
       'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
       'T', 'U', 'V', 'W', 'X', 'Y', 'Z', ' ', 'a', 'b', 'c', 'd', 'e', 'f',
       'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
-      'u', 'v', 'w', 'x', 'y', 'z','å', 'Ä', 'ä', 'Ö', 'ö', 'Ü', 'ü', '/'] 
+      'u', 'v', 'w', 'x', 'y', 'z','å', 'Ä', 'ä', 'Ö', 'ö', 'Ü', 'ü', '/']
 
   - file: "gfonts://Roboto@400"
     id: medium_text
@@ -567,6 +675,17 @@ font:
     size: 60
     bpp: 4
     glyphs: *glyph_list
+
+  - file: ${materialdesignicons_webfont}
+    id: materialdesign_icons
+    size: 35
+    glyphs: ["\U000f1061", "\U000f02e6", "\U000f005d", "\U000f005e", "\U000f0045", "\U000f0046"] # Examples here: https://gist.github.com/kudzidube7/5798f80e70b9a243186c183a119adce6
+# public static readonly string TableChair = "\U000f1061";
+# public static readonly string Human = "\U000f02e6";
+# public static readonly string ArrowUp = "\U000f005d";
+# public static readonly string ArrowUpThick = "\U000f005e";
+# public static readonly string ArrowDown = "\U000f0045";
+# public static readonly string ArrowDownThick = "\U000f0046";
 
 image:
   - file: ${bootlogo}
@@ -589,23 +708,37 @@ time:
         then:
         - script.execute: update_date
 display:
-  - platform: ili9xxx
+  # New driver (mipi_spi) for the CYD (ESP32-2432S028 / ILI9341).
+  # 'dimensions' is required and must be the NATIVE panel size (240x320 portrait).
+  # Setting it to 320x240 exceeds the controller's column range -> "Invalid offsets".
+  # Orientation: display swap_xy + lvgl 'rotation: 270' (below) give the upright
+  # 320x240 landscape UI on this unit.
+  - platform: mipi_spi
     model: ILI9341
     id: my_display
     spi_id: spi_display
     dc_pin: ${dc_display}
     cs_pin: ${cs_display}
-    rotation: 180
-    color_order: RGB
+    color_order: RGB     # If colors are wrong (red <-> blue), switch to BGR.
     invert_colors: false
     auto_clear_enabled: false
     update_interval: never
     data_rate: 40MHz
     dimensions:
-      width: 320
-      height: 240
-
+      # Native portrait size; swap_xy below turns the UI into 320x240 landscape.
+      width: 240
+      height: 320
+    transform:
+      # Landscape orientation. The final upright rotation is done together with
+      # lvgl 'rotation: 270' below (this combination is the one verified on this
+      # unit). If the image is wrong, adjust lvgl rotation and the touch transform.
+      swap_xy: true
+      mirror_x: false
+      mirror_y: false
 lvgl:
+  # Software rotation to get the UI upright on this unit (verified). The touch
+  # transform is matched to this; if you change it, re-check the touch mapping.
+  rotation: 270
   buffer_size: 25%
   on_resume:
     - lvgl.page.show: main_page
@@ -617,7 +750,7 @@ lvgl:
   on_idle:
     - timeout: 30s # Main screen is active for that time
       then:
-        - lvgl.page.show: 
+        - lvgl.page.show:
             id: screensaver
             animation: FADE_OUT
             time: 500ms
@@ -633,7 +766,6 @@ lvgl:
   gradients:
     - id: gradient_bar
       direction: hor
-      dither: none
       stops:
         - color: 0xFF0000
           position: 0
@@ -667,7 +799,7 @@ lvgl:
               - image:
                   align: CENTER
                   src: boot_logo
-                  zoom: 0.7
+                  scale: 0.7
                   y: -35
               - spinner:
                   align: CENTER
@@ -793,9 +925,12 @@ lvgl:
                   on_press: # Trigger for the individual button, returning the checked state, current_preset=5
                     - lambda: |-
                         id(switch_up_HA).turn_on();
+                        id(touch_hold) = true;          // arm the dead-man watchdog
+                        id(last_touch_ms) = millis();
                   on_release:
                     lambda: |-
                       id(switch_up_HA).turn_off();
+                      id(touch_hold) = false;
                 - id: button_down
                   text: "Runter"
                   control:
@@ -804,9 +939,12 @@ lvgl:
                   on_press: # Trigger for the individual button, returning the checked state, current_preset=0
                     - lambda: |-
                         id(switch_down_HA).turn_on();
+                        id(touch_hold) = true;          // arm the dead-man watchdog
+                        id(last_touch_ms) = millis();
                   on_release:
                     lambda: |-
                       id(switch_down_HA).turn_off();
+                      id(touch_hold) = false;
         - bar:
             id: bar_height
             align: BOTTOM_MID
@@ -831,7 +969,7 @@ lvgl:
             align: CENTER
             long_mode: scroll_circular
             text_font: big_text
-            width: 100%  # Nimmt die gesamte Breite des Displays ein
+            width: 100%  # Takes the full width of the display
             recolor: true
       on_press: # Trigger for the individual button, returning the checked state
         - light.turn_on:
@@ -841,27 +979,66 @@ lvgl:
 
 # Disables touch buttons if treshold is exceeded
 script:
-  - id: update_buttons
+  # Central height display (label + bar) as a parametrized script.
+  # Replaces three identical update blocks (sensor, number, boot) -> DRY.
+  - id: update_height_display
+    parameters:
+      h: float
     mode: restart
     then:
+      - lvgl.label.update:
+          id: height_label
+          text:
+            format: "Höhe: %.1f cm"
+            args: [h]
+      - lvgl.bar.update:
+          id: bar_height
+          value: !lambda 'return h;'
+  # Disable/enable the up/down buttons at the end stops.
+  # Only writes the LVGL widget when the disabled state actually changes.
+  - id: update_limit_buttons
+    mode: restart
+    then:
+      # UP button: disable at the upper limit ...
       - if:
           condition:
-              - lambda: |-
-                  return id(desk_height).state >= ${max_height};
+            lambda: 'return id(desk_height).state >= ${max_height} && !id(up_disabled);'
           then:
+            - lambda: 'id(up_disabled) = true;'
             - lvgl.matrix.button.update:
                 id: button_up
                 control:
                   disabled: true
+      # ... otherwise enable it again.
       - if:
           condition:
-              - lambda: |-
-                  return id(desk_height).state <= ${min_height};
+            lambda: 'return id(desk_height).state < ${max_height} && id(up_disabled);'
           then:
+            - lambda: 'id(up_disabled) = false;'
+            - lvgl.matrix.button.update:
+                id: button_up
+                control:
+                  disabled: false
+      # DOWN button: disable at the lower limit ...
+      - if:
+          condition:
+            lambda: 'return id(desk_height).state <= ${min_height} && !id(down_disabled);'
+          then:
+            - lambda: 'id(down_disabled) = true;'
             - lvgl.matrix.button.update:
                 id: button_down
                 control:
                   disabled: true
+      # ... otherwise enable it again.
+      - if:
+          condition:
+            lambda: 'return id(desk_height).state > ${min_height} && id(down_disabled);'
+          then:
+            - lambda: 'id(down_disabled) = false;'
+            - lvgl.matrix.button.update:
+                id: button_down
+                control:
+                  disabled: false
   - id: reset_preset_buttons
     mode: restart
     then:
@@ -932,7 +1109,7 @@ script:
           id: time_label
           text: !lambda |-
             auto now = id(current_time).now();
-            // Uhrzeit aktualisieren
+            // Update the time
             char time_buffer[10];
             snprintf(time_buffer, sizeof(time_buffer), "%02d:%02d", now.hour, now.minute);
             return time_buffer;
@@ -942,11 +1119,11 @@ script:
         - lvgl.label.update:
             id: date_label
             text: !lambda |-
-              // Mappings für Wochentag und Monat (beides n-1)
+              // Maps for weekday and month (both indexed n-1)
               constexpr std::array<const char*, 7> day_map = {"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"};
               constexpr std::array<const char*, 12> month_map = {"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"};
               auto now = id(current_time).now();
-              // Datum aktualisieren
+              // Update the date
               char date_buffer[50];
               snprintf(date_buffer, sizeof(date_buffer), "%s, %d. %s", day_map[now.day_of_week - 1], now.day_of_month, month_map[now.month - 1]);
               return date_buffer;
