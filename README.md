@@ -107,14 +107,45 @@ The UI is nice, but there are some considerations:
 Here you will find [flexispot-e7q-esp32-2432s028-default_graphics.yaml](YAML/flexispot-e7q-esp32-2432s028-default_graphics.yaml)
 
 ## flexispot-e7q-esp32-2432s028-lvgl
-Still there are many parts from [ESPHome-touch-display-mount](https://github.com/akuehlewind/ESPHome-touch-display-mount) and the [LoctekMotion IoT project](https://github.com/iMicknl/LoctekMotion_IoT) there is LVGL to control the display, buttons and its UI
-<br>Some special things about this one:
-- 16 Bit graphics and even faster then default_graphics
-- The bar-graph at the bottom indicated the current height. The min/max values are used from the yaml, even if its below or above that (those desks tend to overshoot a little)
-- Less lambdas for the buttons, buttons have automatic touch mapping and still: Buttons are deactivated if certain heights are below or above a treshold (Up/Down button)
-- More or less useful features, such as a bootlogo, status icons, burn-in prevention for the lcd, and even flash-stored information on the last preset beeing used
-- The UI is less appealing than the first version, but its more flexible and faster (live height-data during movement)
-- Its still not a finished product, so please take some time to validate if thats fine for you
+This is the recommended YAML. It still borrows a lot from [ESPHome-touch-display-mount](https://github.com/akuehlewind/ESPHome-touch-display-mount) and the [LoctekMotion IoT project](https://github.com/iMicknl/LoctekMotion_IoT), but the whole UI (display, buttons, status icons) is now built with **LVGL**, which renders noticeably faster than the default graphics.
+<br>What this version currently offers:
+- **16-bit color** and a faster, smoother UI than `default_graphics` – including a live height value while the desk is moving.
+- A **gradient bar** at the bottom that shows the current height. The min/max values come from the YAML, so the bar stays sane even when the desk overshoots its limits (these desks tend to over-/undershoot a little).
+- **Button matrices** for presets and up/down with automatic touch mapping and far fewer lambdas than the old approach. The up/down buttons are automatically **disabled** once the desk reaches the configured min/max height.
+- A **dead-man watchdog**: a touch-initiated hold move is force-stopped if no touch has been seen for ~400 ms, so the desk never keeps driving into an end stop with no finger on the screen.
+- **Burn-in prevention** for the LCD: after the screensaver, an "antiburn" mode (moving snow) protects the panel, and the backlight dims and then turns off on idle.
+- Quality-of-life details: a configurable **boot logo + spinner**, **status icons** (Home Assistant connection, serial activity), **NTP time/date** (German weekday & month names), and the **last used preset** is stored in flash and restored after a reboot. The last known height is also restored so the label is never empty on boot.
+- The UI is less polished than the first version, but it is more flexible, faster, and gives live height feedback during movement.
+- It is still **not a finished product**, so please take some time to validate that it works for your setup.
 
 Here you will find [flexispot-e7q-esp32-2432s028-lvgl.yaml](YAML/flexispot-e7q-esp32-2432s028-lvgl.yaml)
+
+## LVGL – Roadmap / ideas for future versions
+The LVGL YAML works, but there is plenty of room to grow. These are notes-to-self / open ideas for anyone who wants to build on it – contributions welcome.
+
+### UI / UX
+- **On-device settings page**: adjust min/max height, brightness and language directly on the touch display, without going through Home Assistant.
+- **Editable presets on the display**: e.g. long-press a preset button to store the current height, instead of relying on the control box's memory keys.
+- **More informative screensaver**: show a large clock *and* the current desk height at a glance, instead of just the logo and the scrolling "tap to wake" text.
+- **Clearer button states**: more obvious styling for disabled up/down buttons and for the active preset (a proper theme/style block instead of inline colors scattered across the YAML).
+- **Meaningful height bar**: replace the rainbow gradient with zones that actually mean something (e.g. a sitting zone vs. a standing zone, or a marker at your favourite heights).
+- **Reach/standstill feedback**: a short animation or color change when the desk arrives at a preset/target height.
+
+### Use more of the CYD hardware
+- **Ambient light sensor (LDR on GPIO34)**: drive the backlight brightness automatically instead of using fixed idle/active levels.
+- **Buzzer / speaker**: optional audio feedback on button press or when a target height is reached.
+- **RGB LED as a status indicator**: e.g. show "moving", "at preset" or "child lock active" via the on-board RGB LED (already wired up as a `light`).
+
+### Performance & resources
+- **Boot without the fixed 20 s delay**: the current `on_boot` blocks for a hard-coded 20 s before showing the main page. An event-driven boot (wait for time sync / the first height measurement) would feel snappier and more robust.
+- **Font footprint**: the three Roboto sizes already share one glyph list – trimming sizes/bpp or dropping unused glyphs would free more flash.
+- **Rotation & buffer tuning**: the UI is rotated in software (`rotation: 270`); evaluating hardware rotation and tuning `buffer_size` could reduce RAM/CPU load.
+
+### Robustness & maintainability
+- **Multi-language support**: button labels and the weekday/month names are currently hard-coded German. Moving the strings into substitutions would make translating trivial.
+- **On-screen touch calibration**: the touch calibration is hard-coded for one unit. A guided on-screen routine would make the YAML portable across CYD batches, which are known to vary.
+- **Theme/style definitions**: centralise colors, fonts and paddings into reusable LVGL styles instead of repeating them per widget.
+
+### Integration
+- **Richer on-screen status**: Wi-Fi signal strength icon, OTA update progress, or an error/notice toast when the control box stops responding.
 
